@@ -16,11 +16,64 @@
 # the rest of the House View dashboard.
 
 meta:
-  version: "0.1-candidate"
+  version: "0.2-round1-resolved"
   created: "2026-08-11"
+  diagnostic_run: "2026-08-11 17:25, Windows Terminal"
   hsbc_source: "Sentiment shape up, HSBC Multi-Asset Global, 5 March 2024"
   sell_input_count_published: 20   # inferred by counting, not stated by HSBC
   buy_input_count_published: 13    # inferred by counting, not stated by HSBC
+
+  # Round 1 outcome. Tickers marked CONFIRMED below returned usable history on
+  # the Terminal. Every failure was INVALID_TICKER rather than FIELD_DENIED,
+  # which means the gaps are symbology problems, not entitlement problems.
+  round1:
+    buildable: 13
+    partial: 5
+    blocked: 3
+    usable_after_degradation: 16   # 13 buildable + capca, sentiment proxy, survey average running on partial legs
+    effective_sell_denominator: 15  # of 20 published
+    effective_buy_denominator: 10   # of 13 published
+    empty_clusters: [flows, fx_beta]
+    surprises:
+      - "SHORT_INT is entitled: inputs 5 and 6 resolved with semi-monthly history to 2004."
+      - "FUND_NET_ASSET_VAL is entitled: inputs 2 and 3 resolved with full daily history."
+      - "MOVE Index is entitled, 5808 observations from 2004-01-01."
+      - "NAAIMEXP Index resolved, weekly from 2006-07-05."
+    outstanding:
+      - "CTA index: all candidates invalid. See sentiment_tickers_round2.yaml."
+      - "Money market flows 21: all ICI candidates invalid."
+      - "CAPCA UST leg: futures put/call fields return no history."
+      - "Investors Intelligence: all candidates invalid, paid feed."
+    corrected:
+      - >
+        CFTC 17 and 18 were not a symbology problem. Bloomberg exposes COT via
+        the BQL functions cot_position() and cot_traders() behind //blp/bqlsvc,
+        not as tickers on //blp/refdata, so no ticker guess could ever have
+        worked. Terminal function is COT <GO>, not CFTC <GO>. See
+        diagnose_bql.py. This means the provider needs two Bloomberg services.
+
+  # Second data path, introduced by the COT/BQL discovery.
+  services:
+    refdata:
+      service: "//blp/refdata"
+      covers: "the 16 ticker-based inputs, via HistoricalDataRequest on PX_LAST and friends"
+    bql:
+      service: "//blp/bqlsvc"
+      covers: "inputs 17 and 18, via cot_position() and cot_traders()"
+      availability: UNVERIFIED
+      note: >
+        BQL is documented for BQuant and B-PIPE; Desktop API access exists but
+        is not universal. diagnose_bql.py rung 0.1 answers this before anything
+        else is attempted. If the service will not open, COT falls back to the
+        free CFTC Commitments of Traders CSV.
+
+  # Effective history start per input, driven by the shortest confirmed series.
+  # Matters because expanding-window percentiles are unstable early.
+  effective_starts:
+    vix_hy_vix_ig: "2007-04-11"   # HYG 3MO_CALL_IMP_VOL
+    mask: "2004-08-27"            # TLT 3MO_CALL_IMP_VOL
+    average_survey_sentiment: "2006-07-05"  # NAAIMEXP
+    short_interest_equity_bond_etfs: "2007-04-13"  # HYG SHORT_INT
 
 # ---------------------------------------------------------------------------
 # Global request defaults. These mirror the conventions already used by
@@ -109,15 +162,23 @@ inputs:
     compute: {op: rolling_beta, window_days: 20, post: {op: diff, horizon: 3M}}
     sell: {rule: gt, pct: 90, window: expanding}
     buy:  {rule: lt, pct: 10, window: expanding}
+    status: UNRESOLVED
     series:
       - role: dependent
-        candidates: ["NEIXCTA Index", "NEIXCTAT Index", "SGCTAI Index", "BTOPCTA Index"]
+        # ROUND 1: NEIXCTA, NEIXCTAT, SGCTAI all INVALID_TICKER.
+        # BTOPCTA resolved but is dead: last observation 2005-12-30.
+        candidates: []
+        pending: "sentiment_tickers_round2.yaml -> cta_index_hunt_daily, cta_fund_basket, cta_synthetic_trend"
       - role: factor
-        candidates: ["SPX Index"]
+        candidates: ["SPX Index"]   # CONFIRMED, 5687 obs from 2004-01-02
     notes: >
-      SG CTA Index is the most likely public stand-in for HSBC's "macro and
-      systematic CTA indices". Note the index is published daily but with a
-      one-day lag, and HSBC's exact index set is not disclosed.
+      The CTA index is the single biggest unresolved item. Round 2 tests three
+      routes: daily investable CTA indices, a managed-futures fund NAV basket
+      (viable now that FUND_NET_ASSET_VAL is confirmed entitled), and a
+      synthetic vol-scaled trend signal computed from SPX alone. The third
+      always works, so this input is recoverable in the worst case, but at
+      reduced fidelity. Do not ship it silently as "CTA beta" if the synthetic
+      route is used; label it as a trend proxy in the UI.
 
   - id: us_equity_fund_beta
     hsbc_ref: 2
@@ -177,11 +238,17 @@ inputs:
     compute: {op: rolling_beta, window_days: 20, post: {op: level}}
     sell: {rule: gt, pct: 80, window: {rolling_years: 1}}
     buy: null
+    status: UNRESOLVED
     series:
       - role: dependent
-        candidates: ["NEIXCTA Index", "NEIXCTAT Index", "SGCTAI Index"]
+        candidates: []   # ROUND 1: all CTA candidates INVALID_TICKER
+        pending: "sentiment_tickers_round2.yaml -> same three routes as cta_equity_beta"
       - role: factor
-        candidates: ["DXY Curncy", "BBDXY Index"]
+        candidates: ["DXY Curncy", "BBDXY Index"]  # both CONFIRMED
+    notes: >
+      Shares a dependent series with cta_equity_beta, so both are resolved or
+      blocked together. This is the sole member of the fx_beta cluster, which is
+      therefore currently empty.
 
   - id: short_interest_equity_etfs
     hsbc_ref: 5
@@ -295,13 +362,19 @@ inputs:
     compute: {op: mean_of_zscores, post: {op: diff, horizon: 3M}}
     sell: {rule: gt, pct: 90, window: {rolling_years: 5}}
     buy:  {rule: lt, pct: 10, window: {rolling_years: 5}}
+    status: PARTIAL
+    degraded_mode: equity_only
     series:
       - role: equity_put_call
-        candidates: ["PCRTEQTY Index", "PCUSEQTR Index", "PCRTTOTL Index", "PCC Index"]
+        # CONFIRMED: PCRTEQTY 5694 obs from 2004-01-02. PCUSEQTR and PCRTTOTL
+        # also resolved; PCC Index invalid.
+        candidates: ["PCRTEQTY Index", "PCUSEQTR Index", "PCRTTOTL Index"]
       - role: ust_put_call
-        field: PUT_CALL_OPEN_INTEREST_RATIO
-        field_alternates: ["PUT_CALL_VOLUME_RATIO"]
-        candidates: ["TY1 Comdty", "TYA Comdty"]
+        # ROUND 1: TY1 and TYA resolved as securities but the put/call fields
+        # returned no observations. Futures chains are the wrong route.
+        optional: true
+        candidates: []
+        pending: "sentiment_tickers_round2.yaml -> capca_ust_leg_hunt"
     notes: >
       Equity leg is public (Cboe). UST leg is the weak point: HSBC does not
       specify which Treasury option chain or which ratio. The candidates use
@@ -323,11 +396,13 @@ inputs:
     buy:  {rule: gt, pct: 90, window: expanding}
     series:
       - role: equity_skew
-        candidates: ["SKEW Index"]
+        candidates: ["SKEW Index"]   # CONFIRMED, 5683 obs from 2004-01-02
       - role: ust_skew
         field: 3MO_CALL_IMP_VOL
         field_alternates: ["3MO_PUT_IMP_VOL"]
-        candidates: ["TY1 Comdty", "TLT US Equity"]
+        # CONFIRMED via TLT, 5495 obs from 2004-08-27. TY1 returned no data,
+        # so the ETF route is the working one and is now first.
+        candidates: ["TLT US Equity", "IEF US Equity"]
     notes: >
       Equity leg is clean (Cboe SKEW). UST skew is not published as an index;
       the candidate approach derives a crude 25-delta proxy from call and put
@@ -366,14 +441,18 @@ inputs:
     series:
       - role: numerator
         field: 3MO_CALL_IMP_VOL
-        candidates: ["VXHYG Index", "HYG US Equity"]
+        # CONFIRMED via HYG, 4803 obs from 2007-04-11. VXHYG returned no data.
+        candidates: ["HYG US Equity"]
       - role: denominator
         field: 3MO_CALL_IMP_VOL
-        candidates: ["VXIGX Index", "LQD US Equity"]
+        # CONFIRMED via LQD, 5472 obs from 2004-09-22. VXIGX invalid.
+        candidates: ["LQD US Equity"]
     notes: >
-      Cboe discontinued several ETF volatility indices. If VXHYG/VXIGX do not
-      resolve, fall back to 3-month implied vol on HYG and LQD directly, which
-      is what the second candidate in each slot does.
+      The Cboe ETF volatility indices are gone, as suspected, and the ETF
+      implied-vol fallback carried it. Effective start is 2007-04-11, set by
+      HYG's launch, so this input has three fewer years of history than the
+      rest. Its expanding-window percentile is therefore computed on a shorter
+      sample and should not be read as comparable to the pre-2007 inputs.
 
   - id: move
     hsbc_ref: 14
@@ -446,18 +525,28 @@ inputs:
     compute: {op: mean_of_zscores, post: {op: diff, horizon: 3M}}
     sell: {rule: gt, pct: 90, window: expanding}
     buy: null
+    status: PENDING_BQL
+    source: bql
+    bql:
+      # One multi-security BQL request covers the whole basket.
+      securities: ["ES1 Index", "GC1 Comdty", "TY1 Comdty", "JY1 Curncy", "AD1 Curncy"]
+      report_type: cftc_legacy
+      commitment_type: futures_and_options
+      trader_type: non_commercial
+      combine: mean_of_zscores
+      # Sign convention: gold and JPY are risk-off, so their z-scores are
+      # inverted before averaging, otherwise the composite cancels itself out.
+      invert: ["GC1 Comdty", "JY1 Curncy", "TY1 Comdty"]
+      normalise_by_open_interest: true
     series:
       - role: basket
-        resolve_via_terminal: "CFTC <GO>"
-        candidates:
-          - "CFTC 13874A Index"
-          - "IMM0006 Index"
-          - "CGNSSPNT Index"
+        candidates: []
+        pending: "diagnose_bql.py -> group cot_basket"
     notes: >
-      CFTC symbology on Bloomberg is the least reliably documented item in this
-      file. Resolve the exact tickers on the Terminal via CFTC <GO> or CFTC
-      COT <GO> and promote them here. The diagnostic will almost certainly
-      report these candidates as unresolved.
+      HSBC does not disclose which contracts sit in their risk-on/risk-off
+      basket. Equities, gold, ten-year Treasuries, yen and Aussie is a
+      reasonable reading and covers both sides of the risk trade. The invert
+      list matters and is an assumption worth surfacing in the UI.
 
   - id: cftc_equities
     hsbc_ref: 18
@@ -469,12 +558,33 @@ inputs:
     compute: {op: level}
     sell: {rule: gt, pct: 90, window: expanding}
     buy:  {rule: lt, pct: 10, window: expanding}
+    status: PENDING_BQL
+    # Not a ticker. Bloomberg exposes COT through the BQL function
+    # cot_position(), behind //blp/bqlsvc rather than //blp/refdata. Every round
+    # 1 ticker guess was doomed for that reason. Terminal function is COT <GO>.
+    source: bql
+    bql:
+      security: "ES1 Index"
+      report_type: cftc_legacy
+      commitment_type: futures_and_options
+      trader_type: non_commercial
+      # Net = long minus short. Syntax confirmed by diagnose_bql.py rung 3.x.
+      expression_template: |
+        let(#long=cot_position(report_type=cftc_legacy,crop_year=all,
+              trader_type=non_commercial,direction=long,
+              commitment_type=futures_and_options,dates=range({start},{end}));
+            #short=cot_position(report_type=cftc_legacy,crop_year=all,
+              trader_type=non_commercial,direction=short,
+              commitment_type=futures_and_options,dates=range({start},{end}));
+            #net=#long-#short)
+        get(#net) for('{security}')
+      # Preferred form: scale by total open interest so the series is comparable
+      # across twenty years of changing contract and market size.
+      normalise_by_open_interest: true
     series:
       - role: primary
-        resolve_via_terminal: "CFTC <GO>"
-        candidates:
-          - "CFTC 13874A Index"
-          - "IMM0006 Index"
+        candidates: []
+        pending: "diagnose_bql.py -> groups cot_history, cot_normalise"
 
   - id: hsbc_equity_sentiment_proxy
     hsbc_ref: 19
@@ -484,15 +594,19 @@ inputs:
     compute: {op: mean_of_zscores, post: {op: level}}
     sell: {rule: gt, pct: 90, window: {rolling_years: 3}}
     buy:  {rule: lt, pct: 10, window: {rolling_years: 3}}
+    status: PARTIAL
+    degraded_mode: three_leg   # survey + volatility + put_call, flows omitted
     series:
       - role: survey
-        candidates: ["AAIIBULL Index", "AAII BULLISH Index"]
+        candidates: ["AAIIBULL Index", "AAII BULLISH Index"]  # both CONFIRMED, 1179 weekly obs
       - role: volatility
-        candidates: ["VIX Index"]
+        candidates: ["VIX Index"]   # CONFIRMED, 5719 obs
       - role: flows
-        candidates: ["ICIMMTOT Index", "MMMFTOT Index"]
+        optional: true
+        candidates: []   # ROUND 1: ICIMMTOT and MMMFTOT both INVALID_TICKER
+        pending: "sentiment_tickers_round2.yaml -> money_market_flow_hunt"
       - role: put_call
-        candidates: ["PCRTEQTY Index", "PCUSEQTR Index"]
+        candidates: ["PCRTEQTY Index", "PCUSEQTR Index"]   # both CONFIRMED
     notes: >
       HSBC states the ingredients (AAII + VIX + flows + put-call) but not the
       weights. Equal-weight z-scores assumed. Heavily redundant with inputs 12,
@@ -510,19 +624,26 @@ inputs:
     sell: {rule: gt, pct: 90, window: expanding}
     buy:  {rule: lt, pct: 10, window: expanding}
     series:
+    status: PARTIAL
+    degraded_mode: aaii_naaim_only
+    series:
       - role: aaii_bull
-        candidates: ["AAIIBULL Index"]
+        candidates: ["AAIIBULL Index"]   # CONFIRMED, 1179 weekly obs from 2004-01-01
       - role: aaii_bear
-        candidates: ["AAIIBEAR Index"]
+        candidates: ["AAIIBEAR Index"]   # CONFIRMED, 1179 weekly obs
       - role: investors_intelligence
-        candidates: ["INBB Index", "IIBULL Index", "IISBULLS Index"]
+        optional: true
+        candidates: []   # ROUND 1: INBB, IIBULL, IISBULLS all INVALID_TICKER
+        pending: "sentiment_tickers_round2.yaml -> investors_intelligence_hunt"
       - role: naaim
-        candidates: ["NAAIMEXP Index", "NAAIM Index"]
+        candidates: ["NAAIMEXP Index"]   # CONFIRMED, 1046 weekly obs from 2006-07-05
     notes: >
-      AAII tickers are the most likely to resolve. Investors Intelligence is a
-      paid feed even on Bloomberg. NAAIM may not be carried at all; if it does
-      not resolve it can be scraped from naaim.org weekly as a supplementary
-      loader outside blpapi.
+      NAAIM resolved, which was the pleasant surprise here, so the survey leg
+      has two of three sources and does not need a non-Bloomberg loader.
+      Investors Intelligence is a paid Chartcraft feed and is unlikely to be
+      recoverable. Note NAAIM starts in July 2006, two and a half years after
+      AAII, so the composite's effective start is 2006-07-05 unless you weight
+      by available legs at each date.
 
   - id: money_market_3m_flow
     hsbc_ref: 21
@@ -538,13 +659,19 @@ inputs:
     crisis_filter: ["2020"]
     sell: {rule: lt, pct: 10, window: {rolling_years: 5}}
     buy:  {rule: gt, pct: 90, window: {rolling_years: 5}}
+    status: BLOCKED
     series:
       - role: primary
-        candidates: ["ICIMMTOT Index", "ICIMMF Index", "MMMFTOT Index", "ICITOTAL Index"]
+        candidates: []   # ROUND 1: all four INVALID_TICKER
+        pending: "sentiment_tickers_round2.yaml -> money_market_flow_hunt"
     notes: >
-      ICI publishes weekly. If no ICI ticker resolves, the Federal Reserve H.6
-      money stock series or the OFR money market fund monitor are fallbacks,
-      both outside blpapi.
+      The only input whose cluster has no other members, so losing it removes
+      the flows dimension entirely rather than merely thinning it. That makes it
+      the highest-value of the three blocked inputs to recover. If round 2 also
+      fails, ICI's free weekly money fund assets release or the Federal Reserve
+      H.6 series are straightforward scheduled downloads, but adding a
+      non-blpapi loader is an architectural decision worth taking deliberately
+      given the provider-isolation rule and the corporate proxy.
 
 # ---------------------------------------------------------------------------
 # Correlation clusters used by the improved aggregation mode. Inputs inside a

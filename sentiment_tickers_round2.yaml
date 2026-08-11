@@ -1,0 +1,242 @@
+# sentiment_tickers_round2.yaml
+#
+# Gap-closing ticker hunt. Round 1 resolved 16 of 21 inputs to a usable state.
+# This file tests ONLY the five that did not, plus the two missing legs inside
+# otherwise-working composites. Same schema as sentiment_tickers.yaml, so run it
+# with the same script:
+#
+#     python diagnose_sentiment.py --config sentiment_tickers_round2.yaml --outdir round2
+#
+# 47 candidate checks. A few minutes, read-only.
+#
+# What round 1 established that shapes this file:
+#   - FUND_NET_ASSET_VAL is entitled and carries full history. That makes a
+#     managed-futures fund basket a viable stand-in for the CTA index, which is
+#     the route the cta_* entries below take.
+#   - 3MO_CALL_IMP_VOL works on ETFs but PUT_CALL_OPEN_INTEREST_RATIO returned
+#     nothing on futures. The put/call hunt below therefore targets ETF-level
+#     option aggregate fields rather than the futures chain.
+#   - Every failure in round 1 was INVALID_TICKER, not FIELD_DENIED. That means
+#     these are symbology problems, not entitlement problems, and are worth one
+#     more round of guessing before falling back to non-Bloomberg loaders.
+
+meta:
+  version: "round2-gapfill"
+  created: "2026-08-11"
+  parent_config: "sentiment_tickers.yaml"
+  targets: [cta_equity_beta, cta_usd_beta, money_market_3m_flow,
+            capca_ust_leg, survey_ii_leg]
+  excluded:
+    cftc_17_and_18: >
+      Handled by diagnose_bql.py, not by ticker hunting. COT is a BQL function
+      on //blp/bqlsvc, not a security on //blp/refdata.
+
+defaults:
+  field: PX_LAST
+  periodicity: DAILY
+  history_start: "2004-01-01"
+  min_history_years: 5
+  max_staleness_days: {daily: 7, weekly: 21, monthly: 60}
+
+inputs:
+
+  # -------------------------------------------------------------------------
+  # 1 & 4. CTA exposure. Round 1: NEIXCTA, NEIXCTAT and SGCTAI all invalid;
+  # BTOPCTA resolved but died in December 2005. Three routes tested here, in
+  # descending order of fidelity to HSBC's construction.
+  # -------------------------------------------------------------------------
+  - id: cta_index_hunt_daily
+    hsbc_ref: 1
+    name: "CTA index candidates (daily investable/replication indices)"
+    kind: direct
+    availability_hsbc: semi_proprietary
+    compute: {op: level}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 10, window: expanding}
+    series:
+      - role: primary
+        candidates:
+          - "HFRXSDV Index"     # HFRX Macro: Systematic Diversified CTA, daily
+          - "HFRXM Index"       # HFRX Macro/CTA, daily
+          - "BTOP50 Index"      # Barclay BTOP50, the likely parent of BTOPCTA
+          - "SGIXCTA Index"
+          - "SGCTA Index"
+          - "NEIXCTAM Index"
+          - "CSLABMF Index"     # Credit Suisse Managed Futures
+          - "DJCSMF Index"
+          - "SPSYTMFT Index"
+    notes: >
+      Daily frequency is essential: a 20-day rolling beta cannot be estimated
+      from a monthly index. HFRI and Eurekahedge are monthly and are therefore
+      deliberately excluded even though they may resolve. Prefer whichever of
+      these returns daily data with the longest history.
+
+  - id: cta_fund_basket
+    hsbc_ref: 1
+    name: "Managed futures fund NAV basket (CTA proxy)"
+    kind: proxy
+    availability_hsbc: semi_proprietary
+    compute: {op: rolling_beta, window_days: 20, post: {op: diff, horizon: 3M}}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 10, window: expanding}
+    series:
+      - role: dependent_basket
+        price_field: FUND_NET_ASSET_VAL
+        weight_field: FUND_TOTAL_ASSETS
+        candidates:
+          - "RYMFX US Equity"   # Guggenheim Managed Futures, ~2007, longest history
+          - "AQMIX US Equity"   # AQR Managed Futures Strategy I, 2010
+          - "AQMNX US Equity"
+          - "WTMF US Equity"    # WisdomTree Managed Futures ETF, 2011
+          - "ASFYX US Equity"   # LoCorr Managed Futures Strategy, 2011
+          - "PQTAX US Equity"   # PIMCO TRENDS, 2014
+          - "ABYIX US Equity"   # Abbey Capital Futures Strategy, 2014
+          - "DBMF US Equity"    # iMGP DBi Managed Futures, 2019
+          - "KMLM US Equity"    # KFA Mount Lucas, 2020
+      - role: factor
+        candidates: ["SPX Index", "DXY Curncy"]
+    notes: >
+      This is the fallback that round 1 made viable by confirming
+      FUND_NET_ASSET_VAL entitlement. Expect OK_SHORT_HISTORY on most of these.
+      Only funds with a start date before roughly 2012 are worth keeping, so
+      that the expanding-window percentile has something to work with.
+
+  - id: cta_synthetic_trend
+    hsbc_ref: 1
+    name: "Synthetic trend-follower equity exposure (computed, no new tickers)"
+    kind: proxy
+    availability_hsbc: semi_proprietary
+    compute:
+      op: trend_replication
+      lookbacks_days: [21, 63, 252]
+      vol_scale_window_days: 60
+      post: {op: diff, horizon: 3M}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 10, window: expanding}
+    series:
+      - role: underlying
+        candidates: ["SPX Index"]
+      - role: underlying_fx
+        candidates: ["DXY Curncy"]
+    notes: >
+      Guaranteed to work: both tickers already passed round 1. A vol-scaled
+      blend of 1, 3 and 12-month time-series momentum is the standard public
+      approximation of a trend-follower's directional exposure, so this measures
+      what HSBC's CTA beta is trying to measure without needing their index set.
+      Lowest fidelity, highest reliability. Use it if the two routes above fail.
+
+  # -------------------------------------------------------------------------
+  # 17 & 18. CFTC. Round 1: all three candidates invalid. Bloomberg's COT
+  # symbology is not documented publicly, so this is a broad guess. If it fails
+  # again, resolve on the Terminal via CFTC <GO> or SECF <GO>, or use the free
+  # CFTC CSV loader described in the notes.
+  # -------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # 17 & 18 (CFTC) HAVE BEEN REMOVED FROM THIS FILE.
+  #
+  # They were never a symbology problem. Bloomberg exposes Commitments of
+  # Traders through the BQL functions cot_position() and cot_traders(), behind
+  # //blp/bqlsvc, so no ticker on //blp/refdata could ever have resolved. The
+  # Terminal function is COT <GO>, not CFTC <GO>.
+  #
+  # Use diagnose_bql.py instead. Running the ticker hunt for these two would
+  # burn requests to confirm something already known to be a dead end.
+  # -------------------------------------------------------------------------
+
+  # -------------------------------------------------------------------------
+  # 21. Money market fund flows. Round 1: all four ICI candidates invalid. This
+  # is the only input whose cluster is otherwise empty, so it is worth effort.
+  # -------------------------------------------------------------------------
+  - id: money_market_flow_hunt
+    hsbc_ref: 21
+    name: "Money market fund total assets"
+    kind: direct
+    availability_hsbc: public_ici
+    frequency: weekly
+    release_lag_days: 2
+    compute: {op: diff, horizon: 3M, smooth: {op: rolling_mean, months: 1}}
+    sell: {rule: lt, pct: 10, window: {rolling_years: 5}}
+    buy:  {rule: gt, pct: 90, window: {rolling_years: 5}}
+    series:
+      - role: primary
+        candidates:
+          - "ICIMMTOA Index"
+          - "ICIMTOT Index"
+          - "ICIMMTAS Index"
+          - "MMFATOTL Index"
+          - "ALLMMFAS Index"
+          - "MMFAT Index"
+          - "H6MMFTOT Index"
+          - "RMMFTOT Index"
+          - "FARBMMFA Index"
+    notes: >
+      If none resolve, the fallback is ICI's free weekly money market fund
+      assets release, or the Federal Reserve H.6 series. Both are simple
+      scheduled downloads rather than blpapi calls. Note that a non-Bloomberg
+      loader is an architectural decision, not just a coding one, given the
+      provider-isolation rule and the corporate proxy.
+
+  # -------------------------------------------------------------------------
+  # Missing leg of input 10 (CAPCA). Round 1: PCRTEQTY works for the equity leg;
+  # PUT_CALL_OPEN_INTEREST_RATIO returned no data on TY1 and TYA. Futures option
+  # chains are the wrong route. Test ETF-level option aggregates instead.
+  # -------------------------------------------------------------------------
+  - id: capca_ust_leg_hunt
+    hsbc_ref: 10
+    name: "CAPCA UST leg: Treasury option put/call"
+    kind: direct
+    availability_hsbc: partly_public
+    compute: {op: level}
+    sell: {rule: gt, pct: 90, window: {rolling_years: 5}}
+    buy:  {rule: lt, pct: 10, window: {rolling_years: 5}}
+    series:
+      - role: tlt_ratio
+        field: PUT_CALL_VOLUME_RATIO_CUR_DAY
+        field_alternates:
+          - "PUT_CALL_OPEN_INTEREST_RATIO_CUR_DAY"
+          - "OPEN_INT_TOTAL_PUT"
+          - "VOLUME_TOTAL_PUT"
+        candidates: ["TLT US Equity", "IEF US Equity"]
+      - role: tlt_calls
+        field: OPEN_INT_TOTAL_CALL
+        field_alternates: ["VOLUME_TOTAL_CALL"]
+        candidates: ["TLT US Equity"]
+      - role: tlt_put_vol
+        field: 3MO_PUT_IMP_VOL
+        candidates: ["TLT US Equity"]
+    notes: >
+      The `_CUR_DAY` fields are point-in-time by design and may well return no
+      history, in which case the third role is the workable answer: TLT already
+      returns 3MO_CALL_IMP_VOL with history back to August 2004, so a put/call
+      implied-vol skew is computable from the same source. That is a skew rather
+      than a volume ratio, so it belongs in MASK's logic more than CAPCA's, but
+      it carries the same directional information and is honest to document as a
+      substitute. If this role passes and the others fail, make CAPCA
+      equity-only and let MASK carry the UST signal.
+
+  # -------------------------------------------------------------------------
+  # Missing leg of input 20. Lowest priority: AAII and NAAIM both resolved, so
+  # the survey average already has two of three legs.
+  # -------------------------------------------------------------------------
+  - id: investors_intelligence_hunt
+    hsbc_ref: 20
+    name: "Investors Intelligence bull/bear"
+    kind: direct
+    availability_hsbc: mostly_public
+    frequency: weekly
+    compute: {op: level}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 10, window: expanding}
+    series:
+      - role: ii_bulls
+        candidates:
+          - "IIBULLS Index"
+          - "INVIBULL Index"
+          - "IIBB Index"
+          - "IIBULLBR Index"
+          - "CHARTBUL Index"
+    notes: >
+      Investors Intelligence is a paid Chartcraft feed and may be unavailable
+      regardless of ticker. Dropping this leg costs little: the survey average
+      still carries AAII bulls, AAII bears and NAAIM, and the improved mode's
+      cluster weighting means the surveys cluster is not under-represented.
