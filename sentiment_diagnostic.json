@@ -1,0 +1,125 @@
+{
+  "run_at": "2026-08-11T15:28:11",
+  "dry_run": true,
+  "config": "/sessions/loving-wonderful-bell/mnt/outputs/sentiment_tickers.yaml",
+  "candidates": [
+    {
+      "input_id": "vix_curve",
+      "input_name": "VIX curve (VIX3M / VIX)",
+      "kind": "derived",
+      "role": "numerator",
+      "ticker": "VIX3M Index",
+      "field": "PX_LAST",
+      "field_alternates": [],
+      "extra_fields": [],
+      "frequency": "daily",
+      "resolve_via_terminal": null,
+      "status": "NOT_TESTED",
+      "detail": "Dry run",
+      "points": 0,
+      "first_date": null,
+      "last_date": null,
+      "history_years": null,
+      "staleness_days": null,
+      "median_gap_days": null,
+      "inferred_frequency": null,
+      "last_value": null
+    },
+    {
+      "input_id": "vix_curve",
+      "input_name": "VIX curve (VIX3M / VIX)",
+      "kind": "derived",
+      "role": "numerator",
+      "ticker": "VXV Index",
+      "field": "PX_LAST",
+      "field_alternates": [],
+      "extra_fields": [],
+      "frequency": "daily",
+      "resolve_via_terminal": null,
+      "status": "NOT_TESTED",
+      "detail": "Dry run",
+      "points": 0,
+      "first_date": null,
+      "last_date": null,
+      "history_years": null,
+      "staleness_days": null,
+      "median_gap_days": null,
+      "inferred_frequency": null,
+      "last_value": null
+    },
+    {
+      "input_id": "vix_curve",
+      "input_name": "VIX curve (VIX3M / VIX)",
+      "kind": "derived",
+      "role": "denominator",
+      "ticker": "VIX Index",
+      "field": "PX_LAST",
+      "field_alternates": [],
+      "extra_fields": [],
+      "frequency": "daily",
+      "resolve_via_terminal": null,
+      "status": "NOT_TESTED",
+      "detail": "Dry run",
+      "points": 0,
+      "first_date": null,
+      "last_date": null,
+      "history_years": null,
+      "staleness_days": null,
+      "median_gap_days": null,
+      "inferred_frequency": null,
+      "last_value": null
+    },
+    {
+      "input_id": "move",
+      "input_name": "MOVE index",
+      "kind": "direct",
+      "role": "primary",
+      "ticker": "MOVE Index",
+      "field": "PX_LAST",
+      "field_alternates": [],
+      "extra_fields": [],
+      "frequency": "daily",
+      "resolve_via_terminal": null,
+      "status": "NOT_TESTED",
+      "detail": "Dry run",
+      "points": 0,
+      "first_date": null,
+      "last_date": null,
+      "history_years": null,
+      "staleness_days": null,
+      "median_gap_days": null,
+      "inferred_frequency": null,
+      "last_value": null
+    }
+  ],
+  "by_input": {
+    "vix_curve": {
+      "input_id": "vix_curve",
+      "input_name": "VIX curve (VIX3M / VIX)",
+      "kind": "derived",
+      "verdict": "NOT_TESTED",
+      "roles": {
+        "numerator": {
+          "resolved": null,
+          "resolved_basket": null
+        },
+        "denominator": {
+          "resolved": null,
+          "resolved_basket": null
+        }
+      }
+    },
+    "move": {
+      "input_id": "move",
+      "input_name": "MOVE index",
+      "kind": "direct",
+      "verdict": "NOT_TESTED",
+      "roles": {
+        "primary": {
+          "resolved": null,
+          "resolved_basket": null
+        }
+      }
+    }
+  }
+}

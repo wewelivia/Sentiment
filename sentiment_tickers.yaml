@@ -1,0 +1,563 @@
+# sentiment_tickers.yaml
+# Candidate Bloomberg symbology for the HSBC-style sentiment indicator.
+#
+# STATUS: every ticker below is a CANDIDATE, not a confirmed symbol. Bloomberg
+# symbology for survey, CFTC and flow series is not reliably documented outside
+# the Terminal, so each input carries a ranked candidate list. Run
+# diagnose_sentiment.py on the Windows Terminal machine to resolve which
+# candidates exist, carry sufficient history, and are entitled on your licence.
+# The diagnostic writes back a resolved map you can promote into this file.
+#
+# Reference: HSBC Global Research, "Sentiment shape up - Our revamped sentiment
+# indicators", Multi-Asset Global, 5 March 2024.
+#
+# British spelling used throughout. No behavioural code lives here; this file is
+# pure configuration, consistent with the provider-isolation principle used by
+# the rest of the House View dashboard.
+
+meta:
+  version: "0.1-candidate"
+  created: "2026-08-11"
+  hsbc_source: "Sentiment shape up, HSBC Multi-Asset Global, 5 March 2024"
+  sell_input_count_published: 20   # inferred by counting, not stated by HSBC
+  buy_input_count_published: 13    # inferred by counting, not stated by HSBC
+
+# ---------------------------------------------------------------------------
+# Global request defaults. These mirror the conventions already used by
+# blpapi_provider.py so the sentiment provider can share helpers.
+# ---------------------------------------------------------------------------
+defaults:
+  field: PX_LAST
+  periodicity: DAILY
+  # History start. 2004 gives ~20y, enough for expanding-window percentiles to
+  # stabilise and to include 2007-09, which the improved variant deliberately
+  # keeps rather than filters out.
+  history_start: "2004-01-01"
+  # Minimum acceptable history before an input is allowed into the aggregate.
+  min_history_years: 5
+  # An input whose last observation is older than this is treated as stale and
+  # excluded from the live reading rather than silently carried forward.
+  max_staleness_days:
+    daily: 7
+    weekly: 21
+    monthly: 60
+  non_trading_day_fill_option: NON_TRADING_WEEKDAYS
+  non_trading_day_fill_method: PREVIOUS_VALUE
+
+# ---------------------------------------------------------------------------
+# Strength bands, as published.
+# ---------------------------------------------------------------------------
+bands:
+  - {name: "No signal", lo: 0.00, hi: 0.20}
+  - {name: "Mild",      lo: 0.20, hi: 0.30}
+  - {name: "Moderate",  lo: 0.30, hi: 0.40}
+  - {name: "Strong",    lo: 0.40, hi: 0.50}
+  - {name: "Extreme",   lo: 0.50, hi: 1.01}
+
+# ---------------------------------------------------------------------------
+# Engine settings. Both aggregation modes run in parallel off identical inputs.
+# ---------------------------------------------------------------------------
+engine:
+  modes:
+    replica:
+      # Faithful HSBC: binary firing, equal-weighted count, crisis filtering on.
+      aggregation: binary_count
+      apply_crisis_filters: true
+      weighting: equal
+    improved:
+      # Tier-1 fixes: continuous signal, robust scaling, crisis data retained,
+      # correlation clustering to stop redundant inputs dominating the count.
+      aggregation: continuous_zscore
+      apply_crisis_filters: false
+      robust_scaling: median_mad
+      winsorise_at: 3.0
+      weighting: correlation_cluster
+      cluster_corr_threshold: 0.70
+      # Trend overlay (Tier 2 #6): gate sell signals on trend state. Off by
+      # default so the two modes stay comparable until you switch it on.
+      trend_overlay:
+        enabled: false
+        gate_ticker: "SPX Index"
+        gate_rule: "below_200dma"
+        applies_to: [sell]
+  # Difference horizons are undefined in the HSBC report. We pin them to
+  # calendar months and expose the trading-day alternative for sensitivity work.
+  diff_horizon_convention: calendar   # calendar | trading
+  # Smoothing order is likewise undefined. Pinned explicitly.
+  smoothing_order: smooth_then_diff   # smooth_then_diff | diff_then_smooth
+  # Release-lag discipline (Tier 3 #11): each input is stamped at its true
+  # public-availability date, not its as-of date.
+  apply_release_lags: true
+
+# ---------------------------------------------------------------------------
+# The 21 inputs.
+#
+# kind:
+#   direct   - a single Bloomberg series is the input
+#   derived  - computed from two or more Bloomberg series
+#   proxy    - HSBC's input is proprietary; this is a documented substitute
+#
+# availability_hsbc mirrors the assessment in the methodology note.
+# ---------------------------------------------------------------------------
+inputs:
+
+  - id: cta_equity_beta
+    hsbc_ref: 1
+    name: "CTA equity beta"
+    kind: derived
+    availability_hsbc: semi_proprietary
+    compute: {op: rolling_beta, window_days: 20, post: {op: diff, horizon: 3M}}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 10, window: expanding}
+    series:
+      - role: dependent
+        candidates: ["NEIXCTA Index", "NEIXCTAT Index", "SGCTAI Index", "BTOPCTA Index"]
+      - role: factor
+        candidates: ["SPX Index"]
+    notes: >
+      SG CTA Index is the most likely public stand-in for HSBC's "macro and
+      systematic CTA indices". Note the index is published daily but with a
+      one-day lag, and HSBC's exact index set is not disclosed.
+
+  - id: us_equity_fund_beta
+    hsbc_ref: 2
+    name: "US equity fund beta"
+    kind: proxy
+    availability_hsbc: paywalled
+    compute: {op: rolling_beta, window_days: 20, post: {op: diff, horizon: 3M}}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy: null
+    series:
+      - role: dependent_basket
+        weight_field: FUND_TOTAL_ASSETS
+        price_field: FUND_NET_ASSET_VAL
+        candidates:
+          - "AGTHX US Equity"
+          - "FCNTX US Equity"
+          - "TRBCX US Equity"
+          - "AIVSX US Equity"
+          - "DODGX US Equity"
+      - role: factor
+        candidates: ["SPX Index"]
+    notes: >
+      HSBC aggregates the full US equity fund universe by AuM-weighted daily NAV.
+      This proxy uses a fixed basket of large active funds. It is survivorship-
+      biased by construction (Tier 3 #12); treat as directionally indicative.
+      FUND_NET_ASSET_VAL history depth and entitlement both need checking.
+
+  - id: us_multi_asset_fund_equity_beta
+    hsbc_ref: 3
+    name: "US multi-asset fund equity beta"
+    kind: proxy
+    availability_hsbc: paywalled
+    compute: {op: rolling_beta, window_days: 20, post: {op: diff, horizon: 3M}}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 10, window: expanding}
+    series:
+      - role: dependent_basket
+        weight_field: FUND_TOTAL_ASSETS
+        price_field: FUND_NET_ASSET_VAL
+        candidates:
+          - "ABALX US Equity"
+          - "AMECX US Equity"
+          - "VBIAX US Equity"
+          - "PRWCX US Equity"
+          - "DODBX US Equity"
+      - role: factor
+        candidates: ["SPX Index"]
+    notes: >
+      Same caveats as us_equity_fund_beta. Near-collinear with it and with
+      cta_equity_beta; the improved mode clusters all three.
+
+  - id: cta_usd_beta
+    hsbc_ref: 4
+    name: "CTA USD beta"
+    kind: derived
+    availability_hsbc: semi_proprietary
+    compute: {op: rolling_beta, window_days: 20, post: {op: level}}
+    sell: {rule: gt, pct: 80, window: {rolling_years: 1}}
+    buy: null
+    series:
+      - role: dependent
+        candidates: ["NEIXCTA Index", "NEIXCTAT Index", "SGCTAI Index"]
+      - role: factor
+        candidates: ["DXY Curncy", "BBDXY Index"]
+
+  - id: short_interest_equity_etfs
+    hsbc_ref: 5
+    name: "Short interest, large equity ETFs"
+    kind: direct
+    availability_hsbc: paywalled
+    field: SHORT_INT
+    field_alternates: ["EQY_SHORT_INTEREST", "SI_PERCENT_EQY_FLOAT"]
+    compute: {op: diff, horizon: 3M, smooth: {op: rolling_mean, months: 1}}
+    sell: {rule: lt, pct: 10, window: {rolling_years: 5}}
+    buy: null
+    series:
+      - role: basket
+        candidates: ["SPY US Equity", "QQQ US Equity", "IWM US Equity", "VTI US Equity", "IVV US Equity"]
+    notes: >
+      HSBC screens for equity ETFs with AuM >= $20bn, applied as of today across
+      all history, which is survivorship bias. This basket is a fixed
+      approximation. Short interest is bi-weekly at source (FINRA) and is a
+      separately entitled Bloomberg dataset; expect this input to fail the
+      diagnostic on a standard licence.
+
+  - id: short_interest_equity_bond_etfs
+    hsbc_ref: 6
+    name: "Short interest, equity and bond ETFs"
+    kind: direct
+    availability_hsbc: paywalled
+    field: SHORT_INT
+    field_alternates: ["EQY_SHORT_INTEREST"]
+    compute: {op: diff, horizon: 12M, smooth: {op: rolling_mean, months: 1}}
+    sell: {rule: lt, pct: 10, window: {rolling_years: 5}}
+    buy: null
+    series:
+      - role: basket
+        candidates:
+          - "SPY US Equity"
+          - "QQQ US Equity"
+          - "IWM US Equity"
+          - "LQD US Equity"
+          - "HYG US Equity"
+          - "TLT US Equity"
+          - "AGG US Equity"
+          - "BND US Equity"
+    notes: "Bond ETF screen is AuM >= $7.5bn in the HSBC note."
+
+  - id: risk_parity_equity_allocation
+    hsbc_ref: 7
+    name: "Risk parity equity allocation"
+    kind: derived
+    availability_hsbc: computable
+    compute:
+      op: inverse_vol_allocation
+      vol_window_days: 60
+      target_sleeve: equity
+      post: {op: diff, horizon: 3M}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 10, window: expanding}
+    series:
+      - role: sleeve_equity
+        candidates: ["SPX Index"]
+      - role: sleeve_rates
+        candidates: ["LUATTRUU Index", "IEF US Equity"]
+      - role: sleeve_credit
+        candidates: ["LF98TRUU Index", "HYG US Equity"]
+      - role: sleeve_commodity
+        candidates: ["BCOMTR Index", "BCOM Index"]
+    notes: >
+      HSBC also lists a 6M difference variant. Both are computed; the config
+      pins 3M as headline and 6M is available for sensitivity work.
+
+  - id: vol_target_equity_allocation
+    hsbc_ref: 8
+    name: "Vol-target equity allocation"
+    kind: derived
+    availability_hsbc: computable
+    compute:
+      op: vol_target_allocation
+      target_vol: 0.10
+      vol_window_days: 60
+      post: {op: diff, horizon: 6M}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 20, window: expanding}
+    series:
+      - role: underlying
+        candidates: ["SPX Index"]
+
+  - id: equity_momentum_indicator
+    hsbc_ref: 9
+    name: "Equity momentum / positioning indicator"
+    kind: proxy
+    availability_hsbc: proprietary
+    compute: {op: zscore_composite, window_days: 252}
+    sell: {rule: gt, pct: 80, window: {rolling_years: 5}}
+    buy:  {rule: lt, pct: 10, window: {rolling_years: 5}}
+    series:
+      - role: futures_price
+        candidates: ["ES1 Index", "SPX Index"]
+      - role: open_interest
+        field: OPEN_INT
+        candidates: ["ES1 Index"]
+    notes: >
+      HSBC's own positioning model, undisclosed ("same methodology as our FX
+      positioning indicators", 2013) and scaled -10 to +10. This is a
+      trend-and-open-interest substitute, not a replication. Flag it in the UI
+      as a substitute so the aggregate is not read as a clone.
+
+  - id: capca
+    hsbc_ref: 10
+    name: "CAPCA (cross-asset put-call)"
+    kind: derived
+    availability_hsbc: partly_public
+    compute: {op: mean_of_zscores, post: {op: diff, horizon: 3M}}
+    sell: {rule: gt, pct: 90, window: {rolling_years: 5}}
+    buy:  {rule: lt, pct: 10, window: {rolling_years: 5}}
+    series:
+      - role: equity_put_call
+        candidates: ["PCRTEQTY Index", "PCUSEQTR Index", "PCRTTOTL Index", "PCC Index"]
+      - role: ust_put_call
+        field: PUT_CALL_OPEN_INTEREST_RATIO
+        field_alternates: ["PUT_CALL_VOLUME_RATIO"]
+        candidates: ["TY1 Comdty", "TYA Comdty"]
+    notes: >
+      Equity leg is public (Cboe). UST leg is the weak point: HSBC does not
+      specify which Treasury option chain or which ratio. The candidates use
+      the front 10y future's option put-call ratio as the closest available
+      stand-in. Composite weights are undisclosed; equal-weight z-scores
+      assumed and that assumption is surfaced in the UI.
+
+  - id: mask
+    hsbc_ref: 11
+    name: "MASK (multi-asset skew)"
+    kind: derived
+    availability_hsbc: partly_public
+    compute:
+      op: mean_of_zscores
+      smooth: {op: rolling_mean, months: 1}
+      post: {op: diff, horizon: 3M}
+    crisis_filter: ["2020"]
+    sell: {rule: lt, pct: 10, window: expanding}
+    buy:  {rule: gt, pct: 90, window: expanding}
+    series:
+      - role: equity_skew
+        candidates: ["SKEW Index"]
+      - role: ust_skew
+        field: 3MO_CALL_IMP_VOL
+        field_alternates: ["3MO_PUT_IMP_VOL"]
+        candidates: ["TY1 Comdty", "TLT US Equity"]
+    notes: >
+      Equity leg is clean (Cboe SKEW). UST skew is not published as an index;
+      the candidate approach derives a crude 25-delta proxy from call and put
+      implied vols. Expect meaningful divergence from HSBC here.
+
+  - id: vix_curve
+    hsbc_ref: 12
+    name: "VIX curve (VIX3M / VIX)"
+    kind: derived
+    availability_hsbc: public
+    compute:
+      op: ratio
+      smooth: {op: rolling_mean, months: 3}
+      post: {op: diff, horizon: 1M}
+    crisis_filter: ["2020"]
+    sell: {rule: gt, pct: 90, window: {rolling_years: 5}}
+    buy:  {rule: lt, pct: 10, window: {rolling_years: 5}}
+    series:
+      - role: numerator
+        candidates: ["VIX3M Index", "VXV Index"]
+      - role: denominator
+        candidates: ["VIX Index"]
+    notes: >
+      VIX3M was renamed from VXV; older Bloomberg installs may still resolve
+      only VXV. Both candidates are tested and the diagnostic reports which
+      carries the longer history.
+
+  - id: vix_hy_vix_ig
+    hsbc_ref: 13
+    name: "VIX HY / VIX IG"
+    kind: derived
+    availability_hsbc: limited
+    compute: {op: ratio, post: {op: level}}
+    sell: null
+    buy:  {rule: gt, pct: 90, window: expanding}
+    series:
+      - role: numerator
+        field: 3MO_CALL_IMP_VOL
+        candidates: ["VXHYG Index", "HYG US Equity"]
+      - role: denominator
+        field: 3MO_CALL_IMP_VOL
+        candidates: ["VXIGX Index", "LQD US Equity"]
+    notes: >
+      Cboe discontinued several ETF volatility indices. If VXHYG/VXIGX do not
+      resolve, fall back to 3-month implied vol on HYG and LQD directly, which
+      is what the second candidate in each slot does.
+
+  - id: move
+    hsbc_ref: 14
+    name: "MOVE index"
+    kind: direct
+    availability_hsbc: public_licensed
+    compute: {op: diff, horizon: 3M, smooth: {op: rolling_mean, months: 1}}
+    crisis_filter: ["2007-2009", "2020"]
+    sell: {rule: lt, pct: 10, window: expanding}
+    buy: null
+    series:
+      - role: primary
+        candidates: ["MOVE Index"]
+    notes: >
+      MOVE is ICE-owned and separately licensed on some Bloomberg contracts.
+      Worth confirming entitlement explicitly rather than assuming.
+
+  - id: risk_appetite_pc1
+    hsbc_ref: 15
+    name: "Risk appetite (first principal component, risk-on vs risk-off)"
+    kind: derived
+    availability_hsbc: computable
+    compute: {op: pca_first_component, window_days: 252, post: {op: diff, horizon: 6M}}
+    crisis_filter: ["2020-2021"]
+    sell: {rule: gt, pct: 90, window: {rolling_years: 3}}
+    buy: null
+    series:
+      - role: basket
+        candidates:
+          - "SPX Index"
+          - "LUATTRUU Index"
+          - "LF98TRUU Index"
+          - "BCOMTR Index"
+          - "XAU Curncy"
+          - "AUDJPY Curncy"
+          - "VIX Index"
+    notes: >
+      HSBC names the constituents only loosely ("risk-on vs risk-off
+      performances across asset classes"). This basket is a reasonable reading
+      of that description, not a disclosed list.
+
+  - id: cross_asset_rsi
+    hsbc_ref: 16
+    name: "Cross-asset RSI"
+    kind: derived
+    availability_hsbc: computable
+    compute:
+      op: mean_rsi
+      rsi_window_days: 14
+      smooth: {op: rolling_mean, months: 1}
+      post: {op: diff, horizon: 12M}
+    sell: {rule: gt, pct: 90, window: {rolling_years: 1}}
+    buy: null
+    series:
+      - role: basket
+        candidates:
+          - "SPX Index"
+          - "LUATTRUU Index"
+          - "LF98TRUU Index"
+          - "BCOMTR Index"
+          - "DXY Curncy"
+
+  - id: cftc_risk_on_off
+    hsbc_ref: 17
+    name: "CFTC risk-on/off positioning"
+    kind: derived
+    availability_hsbc: public_cot
+    frequency: weekly
+    release_lag_days: 3
+    compute: {op: mean_of_zscores, post: {op: diff, horizon: 3M}}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy: null
+    series:
+      - role: basket
+        resolve_via_terminal: "CFTC <GO>"
+        candidates:
+          - "CFTC 13874A Index"
+          - "IMM0006 Index"
+          - "CGNSSPNT Index"
+    notes: >
+      CFTC symbology on Bloomberg is the least reliably documented item in this
+      file. Resolve the exact tickers on the Terminal via CFTC <GO> or CFTC
+      COT <GO> and promote them here. The diagnostic will almost certainly
+      report these candidates as unresolved.
+
+  - id: cftc_equities
+    hsbc_ref: 18
+    name: "CFTC equity net positioning"
+    kind: direct
+    availability_hsbc: public_cot
+    frequency: weekly
+    release_lag_days: 3
+    compute: {op: level}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 10, window: expanding}
+    series:
+      - role: primary
+        resolve_via_terminal: "CFTC <GO>"
+        candidates:
+          - "CFTC 13874A Index"
+          - "IMM0006 Index"
+
+  - id: hsbc_equity_sentiment_proxy
+    hsbc_ref: 19
+    name: "Equity sentiment composite (HSBC proxy)"
+    kind: proxy
+    availability_hsbc: computable_proxy
+    compute: {op: mean_of_zscores, post: {op: level}}
+    sell: {rule: gt, pct: 90, window: {rolling_years: 3}}
+    buy:  {rule: lt, pct: 10, window: {rolling_years: 3}}
+    series:
+      - role: survey
+        candidates: ["AAIIBULL Index", "AAII BULLISH Index"]
+      - role: volatility
+        candidates: ["VIX Index"]
+      - role: flows
+        candidates: ["ICIMMTOT Index", "MMMFTOT Index"]
+      - role: put_call
+        candidates: ["PCRTEQTY Index", "PCUSEQTR Index"]
+    notes: >
+      HSBC states the ingredients (AAII + VIX + flows + put-call) but not the
+      weights. Equal-weight z-scores assumed. Heavily redundant with inputs 12,
+      20 and the CAPCA equity leg; the improved mode's clustering exists
+      precisely to stop this double-counting.
+
+  - id: average_survey_sentiment
+    hsbc_ref: 20
+    name: "Average survey sentiment"
+    kind: derived
+    availability_hsbc: mostly_public
+    frequency: weekly
+    release_lag_days: 0
+    compute: {op: mean_of_zscores, post: {op: diff, horizon: 12M}}
+    sell: {rule: gt, pct: 90, window: expanding}
+    buy:  {rule: lt, pct: 10, window: expanding}
+    series:
+      - role: aaii_bull
+        candidates: ["AAIIBULL Index"]
+      - role: aaii_bear
+        candidates: ["AAIIBEAR Index"]
+      - role: investors_intelligence
+        candidates: ["INBB Index", "IIBULL Index", "IISBULLS Index"]
+      - role: naaim
+        candidates: ["NAAIMEXP Index", "NAAIM Index"]
+    notes: >
+      AAII tickers are the most likely to resolve. Investors Intelligence is a
+      paid feed even on Bloomberg. NAAIM may not be carried at all; if it does
+      not resolve it can be scraped from naaim.org weekly as a supplementary
+      loader outside blpapi.
+
+  - id: money_market_3m_flow
+    hsbc_ref: 21
+    name: "Money market fund 3-month flow"
+    kind: derived
+    availability_hsbc: public_ici
+    frequency: weekly
+    release_lag_days: 2
+    compute:
+      op: diff
+      horizon: 3M
+      smooth: {op: rolling_mean, months: 1}
+    crisis_filter: ["2020"]
+    sell: {rule: lt, pct: 10, window: {rolling_years: 5}}
+    buy:  {rule: gt, pct: 90, window: {rolling_years: 5}}
+    series:
+      - role: primary
+        candidates: ["ICIMMTOT Index", "ICIMMF Index", "MMMFTOT Index", "ICITOTAL Index"]
+    notes: >
+      ICI publishes weekly. If no ICI ticker resolves, the Federal Reserve H.6
+      money stock series or the OFR money market fund monitor are fallbacks,
+      both outside blpapi.
+
+# ---------------------------------------------------------------------------
+# Correlation clusters used by the improved aggregation mode. Inputs inside a
+# cluster share the cluster's weight rather than each counting once, which is
+# the Tier-1 #3 de-duplication fix.
+# ---------------------------------------------------------------------------
+clusters:
+  beta_exposure:   [cta_equity_beta, us_equity_fund_beta, us_multi_asset_fund_equity_beta]
+  volatility:      [vix_curve, vix_hy_vix_ig, move, mask]
+  options_flow:    [capca]
+  positioning:     [cftc_equities, cftc_risk_on_off, equity_momentum_indicator, short_interest_equity_etfs, short_interest_equity_bond_etfs]
+  surveys:         [average_survey_sentiment, hsbc_equity_sentiment_proxy]
+  systematic_allocation: [risk_parity_equity_allocation, vol_target_equity_allocation]
+  price_momentum:  [cross_asset_rsi, risk_appetite_pc1]
+  flows:           [money_market_3m_flow]
+  fx_beta:         [cta_usd_beta]
